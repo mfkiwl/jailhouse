@@ -523,3 +523,21 @@ __vmreturn:
 	add	sp, sp, #(16 * 16)
 	eret
 	.popsection
+
+
+	.globl sdei_handler
+sdei_handler:
+	mov	w0, #1
+	strh	w0, [x1, #PERCPU_SDEI_EVENT]
+
+	mrs	x0, vtcr_el2
+	orr	x0, x0, #0xff
+	msr	vtcr_el2, x0
+	isb
+	tlbi	vmalls12e1is
+
+	ldr	x0, =SDEI_EVENT_COMPLETE
+	mov	x1, #SDEI_EV_HANDLED
+	smc	#0
+
+	b	.

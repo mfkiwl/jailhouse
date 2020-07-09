@@ -15,6 +15,7 @@
 #include <asm/gic.h>
 #include <asm/gic_v2.h>
 #include <asm/irqchip.h>
+#include <asm/smccc.h>
 
 /* The GICv2 interface numbering does not necessarily match the logical map */
 static u8 gicv2_target_cpu_map[8];
@@ -102,6 +103,27 @@ static int gicv2_cpu_init(struct per_cpu *cpu_data)
 	u32 cell_gicc_ctlr, cell_gicc_pmr;
 	unsigned int n;
 
+	/*
+	 * Get the CPU interface ID for this cpu. It can be discovered by
+	 * reading the banked value of the PPI and IPI TARGET registers
+	 * Patch 2bb3135 in Linux explains why the probe may need to scans the
+	 * first 8 registers: some early implementation returned 0 for the first
+	 * ITARGETSR registers.
+	 * Since those didn't have virtualization extensions, we can safely
+	 * ignore that case.
+	 */
+	if (cpu_data->public.cpu_id >= ARRAY_SIZE(gicv2_target_cpu_map))
+		return trace_error(-EINVAL);
+
+	gicv2_target_cpu_map[cpu_data->public.cpu_id] =
+		mmio_read32(gicd_base + GICD_ITARGETSR);
+
+	if (gicv2_target_cpu_map[cpu_data->public.cpu_id] == 0)
+		return trace_error(-ENODEV);
+
+	if (sdei_available)
+		return 0;
+
 	/* Ensure all IPIs and the maintenance PPI are enabled. */
 	mmio_write32(gicd_base + GICD_ISENABLER, 0x0000ffff | (1 << mnt_irq));
 
@@ -145,24 +167,6 @@ static int gicv2_cpu_init(struct per_cpu *cpu_data)
 	gicv2_clear_pending_irqs();
 
 	cpu_data->public.gicc_initialized = true;
-
-	/*
-	 * Get the CPU interface ID for this cpu. It can be discovered by
-	 * reading the banked value of the PPI and IPI TARGET registers
-	 * Patch 2bb3135 in Linux explains why the probe may need to scans the
-	 * first 8 registers: some early implementation returned 0 for the first
-	 * ITARGETSR registers.
-	 * Since those didn't have virtualization extensions, we can safely
-	 * ignore that case.
-	 */
-	if (cpu_data->public.cpu_id >= ARRAY_SIZE(gicv2_target_cpu_map))
-		return trace_error(-EINVAL);
-
-	gicv2_target_cpu_map[cpu_data->public.cpu_id] =
-		mmio_read32(gicd_base + GICD_ITARGETSR);
-
-	if (gicv2_target_cpu_map[cpu_data->public.cpu_id] == 0)
-		return trace_error(-ENODEV);
 
 	/*
 	 * Forward any pending physical SGIs to the virtual queue.
@@ -225,17 +229,19 @@ static void gicv2_eoi_irq(u32 irq_id, bool deactivate)
 static int gicv2_cell_init(struct cell *cell)
 {
 	/*
-	 * Let the guest access the virtual CPU interface instead of the
-	 * physical one.
+	 * Without SDEI management interrrupts, let the guest access the
+	 * virtual CPU interface instead of the physical.
 	 *
 	 * WARN: some SoCs (EXYNOS4) use a modified GIC which doesn't have any
 	 * banked CPU interface, so we should map per-CPU physical addresses
 	 * here.
 	 * As for now, none of them seem to have virtualization extensions.
 	 */
-	return paging_create(&cell->arch.mm,
-			     system_config->platform_info.arm.gicv_base,
-			     GICC_SIZE,
+	u64 gic_source = sdei_available ?
+		system_config->platform_info.arm.gicc_base :
+		system_config->platform_info.arm.gicv_base;
+
+	return paging_create(&cell->arch.mm, gic_source, GICC_SIZE,
 			     system_config->platform_info.arm.gicc_base,
 			     (PTE_FLAG_VALID | PTE_ACCESS_FLAG |
 			      S2_PTE_ACCESS_RW | S2_PTE_FLAG_DEVICE),
@@ -245,8 +251,8 @@ static int gicv2_cell_init(struct cell *cell)
 static void gicv2_cell_exit(struct cell *cell)
 {
 	paging_destroy(&cell->arch.mm,
-		       system_config->platform_info.arm.gicc_base, GICC_SIZE,
-		       PAGING_COHERENT);
+		       system_config->platform_info.arm.gicc_base,
+		       GICC_SIZE, PAGING_COHERENT);
 }
 
 static void gicv2_adjust_irq_target(struct cell *cell, u16 irq_id)

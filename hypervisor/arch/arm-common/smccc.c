@@ -17,21 +17,31 @@
 #include <asm/smc.h>
 #include <asm/smccc.h>
 
+bool sdei_available = true;
+
 void smccc_discover(void)
 {
-	int ret;
+	long ret;
 
 	ret = smc(PSCI_0_2_FN_VERSION);
 
 	/* We need >=PSCIv1.0 for SMCCC. Against the spec, U-Boot may also
 	 * return a negative error code. */
-	if (ret < 0 || PSCI_VERSION_MAJOR(ret) < 1)
+	if (ret < 0 || PSCI_VERSION_MAJOR(ret) < 1) {
+		sdei_available = false;
 		return;
+	}
 
 	/* Check if PSCI supports SMCCC version call */
 	ret = smc_arg1(PSCI_1_0_FN_FEATURES, SMCCC_VERSION);
-	if (ret != ARM_SMCCC_SUCCESS)
+	if (ret != ARM_SMCCC_SUCCESS) {
+		sdei_available = false;
 		return;
+	}
+
+	/* Check if we have SDEI */
+	ret = smc(SDEI_VERSION);
+	sdei_available = sdei_available && ret >= ARM_SMCCC_SUCCESS;
 
 	/* We need to have SMCCC v1.1 */
 	ret = smc(SMCCC_VERSION);

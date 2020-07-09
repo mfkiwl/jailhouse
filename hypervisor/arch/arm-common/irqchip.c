@@ -22,7 +22,7 @@
 #include <asm/control.h>
 #include <asm/gic.h>
 #include <asm/irqchip.h>
-#include <asm/sysregs.h>
+#include <asm/smccc.h>
 
 #define for_each_irqchip(chip, config, counter)				\
 	for ((chip) = jailhouse_cell_irqchips(config), (counter) = 0;	\
@@ -226,6 +226,11 @@ void irqchip_set_pending(struct public_per_cpu *cpu_public, u16 irq_id)
 	bool local_injection = (this_cpu_public() == cpu_public);
 	const u16 sender = this_cpu_id();
 	unsigned int new_tail;
+
+	if (sdei_available) {
+		irqchip_send_sgi(cpu_public->cpu_id, irq_id);
+		return;
+	}
 
 	if (local_injection && irqchip.inject_irq(irq_id, sender) != -EBUSY)
 		return;
@@ -528,6 +533,9 @@ static unsigned int irqchip_mmio_count_regions(struct cell *cell)
 
 static int irqchip_init(void)
 {
+	if (sdei_available)
+		printk("Using SDEI-based management interrupt\n");
+
 	/* Setup the SPI bitmap */
 	return irqchip_cell_init(&root_cell);
 }
